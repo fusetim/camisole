@@ -119,6 +119,7 @@ class Isolator:
     async def __aexit__(self, exc, value, tb):
         meta_defaults = {
             'cg-mem': 0,
+            'cg-oom-killed': 0,
             'csw-forced': 0,
             'csw-voluntary': 0,
             'exitcode': 0,
