@@ -1,0 +1,74 @@
+name: camisole-test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: "Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.6', '3.7', '3.8', 'pypy3']
+    container:
+      image: archlinux:latest
+    env:
+      isolate_package: 'isolate-git-r165.990e60b-1-x86_64'
+      camisole_languages_package: 'camisole-languages-1-1-any'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Update package database & install dependencies
+        run: pacman -Syu --noconfirm wget
+
+      - name: Install isolate and language deps from Prologin repository
+        run: |
+          wget 'https://repo.prologin.org/${{ env.isolate_package }}.pkg.tar.zst'
+          wget 'https://repo.prologin.org/${{ env.camisole_languages_package }}.pkg.tar.zst'
+          pacman --noconfirm -U '${{ env.isolate_package }}.pkg.tar.zst'
+          pacman --noconfirm -U '${{ env.camisole_languages_package }}.pkg.tar.zst'
+
+      - name: "Setup Python ${{ matrix.python-version }}"
+        uses: actions/setup-python@v2
+        with:
+          python-version: '${{ matrix.python-version }}'
+
+      # https://github.com/actions/setup-python/issues/131
+      - name: Set Python environment variable
+        run: |
+          echo '::set-env name=LD_LIBRARY_PATH::${{ env.pythonLocation }}/lib'
+          echo '::set-env name=PATH::${{ env.pythonLocation }}/bin'
+
+      - name: DEBUG
+        run: ls -R '${{ env.pythonLocation }}/lib'
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install flake8 coverage pytest
+          pip install -e .
+
+      - name: Get language list
+        run: python3 -m camisole languages
+
+      - name: Test all the languages
+        run: python3 -m camisole test -vv
+
+      - name: Run the unit tests
+        env:
+            PYTHONPATH: .
+        run: python3 -m pytest -v --cov --cov-report=xml -v tests/
+
+      - name: Lint with flake8
+        working-directory: ./tools/generator
+        run: |
+          flake8 . --count --show-source --statistics
+
+      - name: Coverage upload to Codecov
+        uses: codecov/codecov-action@v1.0.6
+        with:
+            file: coverage.xml
+            name: stechec2-generator
+            fail_ci_if_error: true
