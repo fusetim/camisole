@@ -22,15 +22,16 @@ import subprocess
 import sys
 
 from camisole.utils import parse_size, parse_float
+from typing import Dict, Union, Optional
 
 
-def lscpu():
-    out = subprocess.check_output(['lscpu'])
-    out = out.decode().strip().split('\n')
+def lscpu() -> Dict[str, str]:
+    out_bytes = subprocess.check_output(['lscpu'])
+    out = out_bytes.decode().strip().split('\n')
     return {k: v.strip() for line in out for k, v in (line.split(':', 1),)}
 
 
-def meminfo():
+def meminfo() -> Dict[str, str]:
     with open('/proc/meminfo') as f:
         out = f.read().strip().split('\n')
     return {k: v.strip() for line in out for k, v in (line.split(':', 1),)}
@@ -39,7 +40,7 @@ def meminfo():
 # This function only gives static system information so we can cache it
 # indefinitely.
 @functools.lru_cache()
-def info():
+def info() -> Dict[str, Optional[Union[float, int, str]]]:
     uname = os.uname()
     cpu = lscpu()
     mem = meminfo()

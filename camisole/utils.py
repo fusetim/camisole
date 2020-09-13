@@ -3,24 +3,28 @@ import os
 import re
 import textwrap
 from decimal import Decimal
+from typing import Any, Sequence, Union, Iterator, Optional, List, Callable
 
 
-def force_bytes(s):
+def force_bytes(s: Union[str, bytes]) -> bytes:
     if isinstance(s, bytes):
         return s
     return s.encode()
 
 
-def uniquify(seq):
+def uniquify(seq: Sequence[Any]) -> Iterator[Any]:
     seen = set()
-    return (x for x in seq if not (x in seen or seen.add(x)))
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            yield x
 
 
-def indent(text, n=4):
+def indent(text: str, n: int = 4) -> str:
     return textwrap.indent(text, ' ' * n)
 
 
-def parse_size(str_size):
+def parse_size(str_size: Optional[str]) -> Optional[int]:
     """
     Transforms "1K", "1k" or "1 kB"-like strings to actual integers.
     Returns None if input is None.
@@ -34,32 +38,37 @@ def parse_size(str_size):
     return int(str_size)
 
 
-def parse_float(str_float):
+def parse_float(str_float: Optional[str]) -> Optional[float]:
     if str_float is None:
         return None
     return float(str_float)
 
 
-def tabulate(rows, headers=None, margin=1, align=None):
+def tabulate(
+    rows: List[List[str]],
+    headers: Optional[List[str]] = None,
+    margin: int = 1,
+    align: Optional[str] = None,
+) -> Iterator[str]:
     ncols = len(rows[0])
     lengths = [-math.inf] * ncols
     if headers:
         # don't side-effect modify rows
         rows = [headers] + rows
     for row in rows:
-        lengths = [max(l, len(col)) for l, col in zip(lengths, row)]
-    lengths = [l + margin for l in lengths]
+        lengths = [max(length, len(col)) for length, col in zip(lengths, row)]
+    lengths = [length + margin for length in lengths]
     if align is None:
-        align = ['<'] * ncols
+        align = '<' * ncols
     fmt = "".join("{:%s{s%d}}%s" % (a, i, " | " if i < ncols - 1 else "")
                   for i, a in enumerate(align))
     for row in rows:
         yield fmt.format(*row, **{f's{i}': l for i, l in enumerate(lengths)})
 
 
-def which(binary):
+def which(binary: str) -> str:
     search_prefixes = ['/usr', '/lib', '/bin']
-    path = [*os.environ.get('PATH').split(os.pathsep),
+    path = [*os.environ.get('PATH', '').split(os.pathsep),
             '/usr/bin',
             '/usr/local/bin'
             '/bin']
@@ -84,7 +93,7 @@ class cached_classmethod:
         def heavy_stuff(cls):
             return 42
     """
-    def __init__(self, func, name=None):
+    def __init__(self, func: Callable, name: str = None):
         self.func = func
         self.__doc__ = getattr(func, '__doc__')
         self.name = name or func.__name__

@@ -17,7 +17,6 @@
 # along with Prologin-SADM.  If not, see <http://www.gnu.org/licenses/>.
 
 import asyncio
-import collections
 import configparser
 import ctypes
 import itertools
@@ -26,20 +25,33 @@ import os
 import pathlib
 import subprocess
 import tempfile
+from types import TracebackType
 
 from camisole.conf import conf
 from camisole.utils import cached_classmethod
+from typing import (
+    Dict, List, Optional, Tuple, Any, Type, NamedTuple, Union, Iterator
+)
+
+try:
+    from signal import strsignal
+except ImportError:
+    from signal import Signals
+
+    LIBC = ctypes.CDLL('libc.so.6')
+    LIBC.strsignal.restype = ctypes.c_char_p
+
+    def strsignal(signum: Union[int, Signals], /) -> Optional[str]:
+        res = LIBC.strsignal(signum)
+        assert isinstance(res, bytes)
+        return res.decode()
 
 
-LIBC = ctypes.CDLL('libc.so.6')
-LIBC.strsignal.restype = ctypes.c_char_p
-
-
-def signal_message(signal: int) -> str:
-    return LIBC.strsignal(signal).decode()
-
-
-async def communicate(cmdline, data=None, **kwargs):
+async def communicate(
+    cmdline: List[str],
+    data: Optional[bytes] = None,
+    **kwargs
+) -> Tuple[int, bytes, bytes]:
     logging.debug('Running %s', ' '.join(str(a) for a in cmdline))
     proc = await asyncio.create_subprocess_exec(
         *cmdline, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -47,6 +59,17 @@ async def communicate(cmdline, data=None, **kwargs):
     stdout, stderr = await proc.communicate(data)
     retcode = await proc.wait()
     return retcode, stdout, stderr
+
+
+def parse_key_value_file(path: 'os.PathLike[str]') -> Dict[str, str]:
+    with open(path) as f:
+        meta_lines = (line.strip() for line in f.readlines())
+    res = {}
+    for line in meta_lines:
+        if line:
+            k, v = line.split(':', 1)
+            res[k] = v
+    return res
 
 
 CAMISOLE_OPTIONS = [
@@ -77,11 +100,11 @@ ISOLATE_TO_CAMISOLE_META = {
 class IsolateInternalError(RuntimeError):
     def __init__(
         self,
-        command,
-        isolate_stdout,
-        isolate_stderr,
-        message="Isolate encountered an internal error."
-    ):
+        command: List[str],
+        isolate_stdout: bytes,
+        isolate_stderr: bytes,
+        message: str = "Isolate encountered an internal error."
+    ) -> None:
         self.command = command
         self.isolate_stdout = isolate_stdout.decode(errors='replace').strip()
         self.isolate_stderr = isolate_stderr.decode(errors='replace').strip()
@@ -97,28 +120,34 @@ class IsolateInternalError(RuntimeError):
 
 
 class Isolator:
-    def __init__(self, opts, allowed_dirs=None):
-        self.opts = opts
-        self.allowed_dirs = allowed_dirs if allowed_dirs is not None else []
-        self.path = None
-        self.cmd_base = None
+    def __init__(
+        self,
+        opts: Dict[str, Any],
+        allowed_dirs: Optional[List[str]] = None
+    ) -> None:
+        self.opts: Dict[str, Any] = opts
+        self.allowed_dirs: List[str] = (
+            allowed_dirs if allowed_dirs is not None else []
+        )
+        self.path: Optional[pathlib.Path] = None
+        self.cmd_base: Optional[List[str]] = None
 
         # Directory containing all the info of the program
         self.stdout_file = '._stdout'
         self.stderr_file = '._stderr'
-        self.meta_file = None
+        self.meta_file: Any = None
 
-        self.stdout = None
-        self.stderr = None
-        self.meta = None
-        self.info = None
+        self.stdout: Optional[bytes] = None
+        self.stderr: Optional[bytes] = None
+        self.meta: Optional[Dict[str, Any]] = None
+        self.info: Optional[Dict[str, Any]] = None
 
         # Result of the isolate binary
-        self.isolate_retcode = None
-        self.isolate_stdout = None
-        self.isolate_stderr = None
+        self.isolate_retcode: Optional[int] = None
+        self.isolate_stdout: Optional[bytes] = None
+        self.isolate_stderr: Optional[bytes] = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> 'Isolator':
         busy = {int(p.name) for p in self.isolate_conf.root.iterdir()}
         avail = set(range(self.isolate_conf.max_boxes)) - busy
         while avail:
@@ -130,7 +159,7 @@ class Isolator:
                 continue
             if retcode != 0:  # noqa
                 raise RuntimeError("{} returned code {}: “{}”".format(
-                    cmd_init, retcode, stderr))
+                    cmd_init, retcode, stderr.decode(errors="replace")))
             break
         else:
             raise RuntimeError("No isolate box ID available.")
@@ -139,46 +168,14 @@ class Isolator:
         self.meta_file.__enter__()
         return self
 
-    async def __aexit__(self, exc, value, tb):
-        meta_defaults = {
-            'cg-mem': 0,
-            'cg-oom-killed': 0,
-            'csw-forced': 0,
-            'csw-voluntary': 0,
-            'exitcode': 0,
-            'exitsig': 0,
-            'exitsig-message': None,
-            'killed': False,
-            'max-rss': 0,
-            'message': None,
-            'status': 'OK',
-            'time': 0.0,
-            'time-wall': 0.0,
-        }
-        with open(self.meta_file.name) as f:
-            m = (line.strip() for line in f.readlines())
-        m = dict(line.split(':', 1) for line in m if line)
-        m = {k: (type(meta_defaults[k])(v)
-                 if meta_defaults[k] is not None else v)
-             for k, v in m.items()}
-        if 'exitsig' in m:
-            m['exitsig-message'] = signal_message(m['exitsig'])
-        self.meta = {**meta_defaults, **m}
-        verbose_status = {
-            'OK': 'OK',
-            'RE': 'RUNTIME_ERROR',
-            'TO': 'TIMED_OUT',
-            'SG': 'SIGNALED',
-            'XX': 'INTERNAL_ERROR',
-        }
-        self.meta['status'] = verbose_status[self.meta['status']]
-
-        if self.meta.get('cg-oom-killed'):
-            self.meta['status'] = 'OUT_OF_MEMORY'
-
-        for imeta, cmeta in ISOLATE_TO_CAMISOLE_META.items():
-            if imeta in self.meta:
-                self.meta[cmeta] = self.meta.pop(imeta)
+    async def __aexit__(
+        self,
+        exc: Optional[Type[BaseException]],
+        value: Optional[BaseException],
+        tb: Optional[TracebackType]
+    ) -> None:
+        assert self.cmd_base is not None
+        self._load_meta_file()
 
         self.info = {
             'stdout': self.stdout,
@@ -191,12 +188,21 @@ class Isolator:
         retcode, stdout, stderr = await communicate(cmd_cleanup)
         if retcode != 0:  # noqa
             raise RuntimeError("{} returned code {}: “{}”".format(
-                cmd_cleanup, retcode, stderr))
+                cmd_cleanup, retcode, stderr.decode(errors="replace")))
 
         self.meta_file.__exit__(exc, value, tb)
 
-    async def run(self, cmdline, data=None, env=None,
-                  merge_outputs=False, **kwargs):
+    async def run(
+        self,
+        cmdline: List[str],
+        data: Optional[bytes] = None,
+        env: Optional[Dict[str, str]] = None,
+        merge_outputs: bool = False,
+        **kwargs
+    ) -> None:
+        assert self.path is not None
+        assert self.cmd_base is not None
+
         cmd_run = self.cmd_base[:]
         cmd_run += list(itertools.chain(
             *[('-d', d) for d in self.allowed_dirs]))
@@ -254,15 +260,68 @@ class Isolator:
                 cmd_run,
                 self.isolate_stdout,
                 self.isolate_stderr,
-                message="Error while reading stdout/stderr: " + e.message,
+                message="Error while reading stdout/stderr: " + str(e),
             )
 
+    def _load_meta_file(self) -> None:
+        meta_defaults = {
+            'cg-mem': 0,
+            'cg-oom-killed': 0,
+            'csw-forced': 0,
+            'csw-voluntary': 0,
+            'exitcode': 0,
+            'exitsig': 0,
+            'exitsig-message': None,
+            'killed': False,
+            'max-rss': 0,
+            'message': None,
+            'status': 'OK',
+            'time': 0.0,
+            'time-wall': 0.0,
+        }
+        meta_dict = parse_key_value_file(self.meta_file.name)
+        print(meta_dict)
+        m: Dict[str, Any] = {}
+        for k, v in meta_dict.items():
+            default_value = meta_defaults[k]
+            if default_value is None:
+                m[k] = v
+            else:
+                m[k] = type(default_value)(v)
+        if 'exitsig' in m:
+            exitsig = m['exitsig']
+            assert isinstance(exitsig, int)
+            print(m)
+            print(exitsig)
+            print(strsignal(exitsig))
+            m['exitsig-message'] = strsignal(exitsig)
+        self.meta = {**meta_defaults, **m}
+        verbose_status = {
+            'OK': 'OK',
+            'RE': 'RUNTIME_ERROR',
+            'TO': 'TIMED_OUT',
+            'SG': 'SIGNALED',
+            'XX': 'INTERNAL_ERROR',
+        }
+        self.meta['status'] = verbose_status[self.meta['status']]
+
+        if self.meta.get('cg-oom-killed'):
+            self.meta['status'] = 'OUT_OF_MEMORY'
+
+        for imeta, cmeta in ISOLATE_TO_CAMISOLE_META.items():
+            if imeta in self.meta:
+                self.meta[cmeta] = self.meta.pop(imeta)
+
+    class IsolateConf(NamedTuple):
+        root: pathlib.Path
+        max_boxes: int
+
     @cached_classmethod
-    def isolate_conf(cls):
+    def isolate_conf(cls) -> IsolateConf:
         parser = configparser.ConfigParser()
         s = 'dummy'
 
-        def dummy_section():
+        def dummy_section() -> Iterator[str]:
             yield f'[{s}]'
             with pathlib.Path(conf['isolate-conf']).expanduser().open() as f:
                 yield from f
@@ -270,5 +329,4 @@ class Isolator:
         parser.read_file(dummy_section())
         root = pathlib.Path(parser.get(s, 'box_root'))
         max_boxes = parser.getint(s, 'num_boxes')
-        return (collections.namedtuple('conf', 'root, max_boxes')
-                (root, max_boxes))
+        return cls.IsolateConf(root, max_boxes)

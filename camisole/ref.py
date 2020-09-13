@@ -1,7 +1,9 @@
+from typing import Dict, Tuple, Any
+
 import camisole.languages
 
 
-async def test(lang_name, **kw):
+async def test(lang_name: str, **kw) -> Tuple[bool, Dict[str, Any]]:
     expected = b'42\n'
     lang_cls = camisole.languages.by_name(lang_name)
     lang = lang_cls({'source': lang_cls.reference_source, 'tests': [{}], **kw})
